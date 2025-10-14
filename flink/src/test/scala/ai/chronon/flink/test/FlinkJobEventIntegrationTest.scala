@@ -2,7 +2,7 @@ package ai.chronon.flink.test
 
 import ai.chronon.api.{GroupBy, TilingUtils}
 import ai.chronon.api.ScalaJavaConversions._
-import ai.chronon.flink.{FlinkJob, SparkExpressionEval, SparkExpressionEvalFn}
+import ai.chronon.flink.{FlinkGroupByStreamingJob, SparkExpressionEval, SparkExpressionEvalFn}
 import ai.chronon.flink.types.TimestampedIR
 import ai.chronon.flink.types.TimestampedTile
 import ai.chronon.flink.types.WriteResponse
@@ -153,7 +153,7 @@ class FlinkJobEventIntegrationTest extends AnyFlatSpec with BeforeAndAfter {
     expectedFinalIRsPerKey shouldBe finalIRsPerKey
   }
 
-  private def buildFlinkJob(groupBy: GroupBy, elements: Seq[E2ETestEvent]): (FlinkJob, GroupByServingInfoParsed) = {
+  private def buildFlinkJob(groupBy: GroupBy, elements: Seq[E2ETestEvent]): (FlinkGroupByStreamingJob, GroupByServingInfoParsed) = {
     val sparkExpressionEvalFn = new SparkExpressionEvalFn(Encoders.product[E2ETestEvent], groupBy)
     val source = new WatermarkedE2EEventSource(elements, sparkExpressionEvalFn)
 
@@ -169,7 +169,7 @@ class FlinkJobEventIntegrationTest extends AnyFlatSpec with BeforeAndAfter {
     val mockApi = mock[Api](withSettings().serializable())
     val writerFn = new MockAsyncKVStoreWriter(Seq(true), mockApi, groupBy.metaData.name)
     val topicInfo = TopicInfo.parse("kafka://test-topic")
-    (new FlinkJob(source,
+    (new FlinkGroupByStreamingJob(source,
                   outputSchemaDataTypes,
                   writerFn,
                   groupByServingInfoParsed,

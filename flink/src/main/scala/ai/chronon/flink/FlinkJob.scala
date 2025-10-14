@@ -1,22 +1,14 @@
 package ai.chronon.flink
 
-import ai.chronon.aggregator.windowing.ResolutionUtils
 import ai.chronon.api.Constants.MetadataDataset
 import ai.chronon.api.Extensions.{GroupByOps, SourceOps}
-import ai.chronon.api.ScalaJavaConversions._
-import ai.chronon.api.{Constants, DataType}
-import ai.chronon.flink.FlinkJob.watermarkStrategy
+import ai.chronon.api.Constants
+import ai.chronon.flink.{AsyncKVStoreWriter, FlinkGroupByStreamingJob}
 import ai.chronon.flink.deser.{DeserializationSchemaBuilder, FlinkSerDeProvider, ProjectedEvent, SourceProjection}
-import ai.chronon.flink.source.{FlinkSource, FlinkSourceProvider, KafkaFlinkSource}
-import ai.chronon.flink.types.{AvroCodecOutput, TimestampedTile, WriteResponse}
+import ai.chronon.flink.joinrunner.FlinkJoinSourceJob
+import ai.chronon.flink.source.FlinkSourceProvider
+import ai.chronon.flink.types.WriteResponse
 import ai.chronon.flink.validation.ValidationFlinkJob
-import ai.chronon.flink.window.{
-  AlwaysFireOnElementTrigger,
-  BufferedProcessingTimeTrigger,
-  FlinkRowAggProcessFunction,
-  FlinkRowAggregationFunction,
-  KeySelectorBuilder
-}
 import ai.chronon.online.fetcher.{FetchContext, MetadataStore}
 import ai.chronon.online.{Api, GroupByServingInfoParsed, TopicInfo}
 import org.apache.flink.api.common.eventtime.{SerializableTimestampAssigner, WatermarkStrategy}
@@ -25,63 +17,43 @@ import org.apache.flink.api.common.restartstrategy.RestartStrategies
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.core.fs.FileSystem
 import org.apache.flink.streaming.api.CheckpointingMode
-import org.apache.flink.streaming.api.datastream.{DataStream, DataStreamSink, SingleOutputStreamOperator}
+import org.apache.flink.streaming.api.datastream.{DataStream, DataStreamSink}
 import org.apache.flink.streaming.api.environment.CheckpointConfig.ExternalizedCheckpointCleanup
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
-import org.apache.flink.streaming.api.functions.async.RichAsyncFunction
-import org.apache.flink.streaming.api.windowing.assigners.{TumblingEventTimeWindows, WindowAssigner}
-import org.apache.flink.streaming.api.windowing.time.Time
-import org.apache.flink.streaming.api.windowing.triggers.Trigger
-import org.apache.flink.streaming.api.windowing.windows.TimeWindow
-import org.apache.flink.util.OutputTag
 import org.rogach.scallop.{ScallopConf, ScallopOption, Serialization}
-import org.slf4j.LoggerFactory
+import org.slf4j.{Logger, LoggerFactory}
 
 import java.time.Duration
 import scala.collection.Seq
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
-/** Flink job that processes a single streaming GroupBy and writes out the results (in the form of pre-aggregated tiles) to the KV store.
-  *
-  * @param eventSrc - Provider of a Flink Datastream[ ProjectedEvent ] for the given topic and groupBy. The event
-  *                    consists of a field Map as well as metadata columns such as processing start time (to track
-  *                    metrics). The Map contains projected columns from the source data based on projections and filters
-  *                    in the GroupBy.
-  * @param sinkFn - Async Flink writer function to help us write to the KV store
-  * @param groupByServingInfoParsed - The GroupBy we are working with
-  * @param parallelism - Parallelism to use for the Flink job
-  * @param enableDebug - If enabled will log additional debug info per processed event
+/** Base abstract class for all Flink streaming jobs in Chronon.
+  * Defines the common interface and shared functionality for different job types.
   */
-class FlinkJob(eventSrc: FlinkSource[ProjectedEvent],
-               inputSchema: Seq[(String, DataType)],
-               sinkFn: RichAsyncFunction[AvroCodecOutput, WriteResponse],
-               groupByServingInfoParsed: GroupByServingInfoParsed,
-               parallelism: Int,
-               props: Map[String, String],
-               topicInfo: TopicInfo,
-               enableDebug: Boolean = false) {
-  private[this] val logger = LoggerFactory.getLogger(getClass)
+abstract class BaseFlinkJob {
 
-  val groupByName: String = groupByServingInfoParsed.groupBy.getMetaData.getName
-  logger.info(f"Creating Flink job. groupByName=${groupByName}")
+  protected val logger: Logger = LoggerFactory.getLogger(getClass)
 
-  if (groupByServingInfoParsed.groupBy.streamingSource.isEmpty) {
-    throw new IllegalArgumentException(
-      s"Invalid groupBy: $groupByName. No streaming source"
-    )
-  }
+  def groupByName: String
 
-  private val kvStoreCapacity = FlinkUtils
-    .getProperty("kv_concurrency", props, topicInfo)
-    .map(_.toInt)
-    .getOrElse(AsyncKVStoreWriter.kvStoreConcurrency)
+  def groupByServingInfoParsed: GroupByServingInfoParsed
 
-  // The source of our Flink application is a  topic
-  val topic: String = groupByServingInfoParsed.groupBy.streamingSource.get.topic
+  /** Run the streaming job with tiling enabled (default mode).
+    * This is the main execution method that should be implemented by subclasses.
+    */
+  def runTiledGroupByJob(env: StreamExecutionEnvironment): DataStream[WriteResponse]
+}
+
+object FlinkJob {
+  // we set an explicit max parallelism to ensure if we do make parallelism setting updates, there's still room
+  // to restore the job from prior state. Number chosen does have perf ramifications if too high (can impact rocksdb perf)
+  // so we've chosen one that should allow us to scale to jobs in the 10K-50K events / s range.
+  val MaxParallelism: Int = 1260 // highly composite number
 
   def runWriteInternalManifestJob(env: StreamExecutionEnvironment,
                                   manifestPath: String,
-                                  parentJobId: String): DataStreamSink[String] = {
+                                  parentJobId: String,
+                                  groupByName: String): DataStreamSink[String] = {
 
     // check that the last character is a slash
     val outputPath = if (!manifestPath.endsWith("/")) {
@@ -108,166 +80,6 @@ class FlinkJob(eventSrc: FlinkSource[ProjectedEvent],
       .name(s"Write manifest mapping to $outputPath")
       .setParallelism(1) // Use parallelism 1 to get a single output file
   }
-
-  /** The "untiled" version of the Flink app.
-    *
-    *  At a high level, the operators are structured as follows:
-    *    source -> Spark expression eval -> Avro conversion -> KV store writer
-    *    source - Reads objects of type T (specific case class, Thrift / Proto) from a  topic
-    *   Spark expression eval - Evaluates the Spark SQL expression in the GroupBy and projects and filters the input data
-    *   Avro conversion - Converts the Spark expr eval output to a form that can be written out to the KV store
-    *      (PutRequest object)
-    *   KV store writer - Writes the PutRequest objects to the KV store using the AsyncDataStream API
-    *
-    *  In this untiled version, there are no shuffles and thus this ends up being a single node in the Flink DAG
-    *  (with the above 4 operators and parallelism as injected by the user).
-    */
-  def runGroupByJob(env: StreamExecutionEnvironment): DataStream[WriteResponse] = {
-
-    logger.info(
-      f"Running Flink job for groupByName=${groupByName}, Topic=${topic}. " +
-        "Tiling is disabled.")
-
-    // we expect parallelism on the source stream to be set by the source provider
-    val sourceSparkProjectedStream: DataStream[ProjectedEvent] =
-      eventSrc
-        .getDataStream(topic, groupByName)(env, parallelism)
-        .uid(s"source-$groupByName")
-        .name(s"Source for $groupByName")
-
-    val sparkExprEvalDSWithWatermarks: DataStream[ProjectedEvent] = sourceSparkProjectedStream
-      .assignTimestampsAndWatermarks(watermarkStrategy)
-      .uid(s"spark-expr-eval-timestamps-$groupByName")
-      .name(s"Spark expression eval with timestamps for $groupByName")
-      .setParallelism(sourceSparkProjectedStream.getParallelism)
-
-    val putRecordDS: DataStream[AvroCodecOutput] = sparkExprEvalDSWithWatermarks
-      .flatMap(AvroCodecFn(groupByServingInfoParsed))
-      .uid(s"avro-conversion-$groupByName")
-      .name(s"Avro conversion for $groupByName")
-      .setParallelism(sourceSparkProjectedStream.getParallelism)
-
-    AsyncKVStoreWriter.withUnorderedWaits(
-      putRecordDS,
-      sinkFn,
-      groupByName,
-      capacity = kvStoreCapacity
-    )
-  }
-
-  /** The "tiled" version of the Flink app.
-    *
-    * The operators are structured as follows:
-    *  1.  source - Reads objects of type T (specific case class, Thrift / Proto) from a  topic
-    *  2. Spark expression eval - Evaluates the Spark SQL expression in the GroupBy and projects and filters the input
-    *      data
-    *  3. Window/tiling - This window aggregates incoming events, keeps track of the IRs, and sends them forward so
-    *      they are written out to the KV store
-    *  4. Avro conversion - Finishes converting the output of the window (the IRs) to a form that can be written out
-    *      to the KV store (PutRequest object)
-    *  5. KV store writer - Writes the PutRequest objects to the KV store using the AsyncDataStream API
-    *
-    *  The window causes a split in the Flink DAG, so there are two nodes, (1+2) and (3+4+5).
-    */
-  def runTiledGroupByJob(env: StreamExecutionEnvironment): DataStream[WriteResponse] = {
-    logger.info(
-      f"Running Flink job for groupByName=${groupByName}, Topic=${topic}. " +
-        "Tiling is enabled.")
-
-    val tilingWindowSizeInMillis: Long =
-      ResolutionUtils.getSmallestTailHopMillis(groupByServingInfoParsed.groupBy)
-
-    // we expect parallelism on the source stream to be set by the source provider
-    val sourceSparkProjectedStream: DataStream[ProjectedEvent] =
-      eventSrc
-        .getDataStream(topic, groupByName)(env, parallelism)
-        .uid(s"source-$groupByName")
-        .name(s"Source for $groupByName")
-
-    val sparkExprEvalDSAndWatermarks: DataStream[ProjectedEvent] = sourceSparkProjectedStream
-      .assignTimestampsAndWatermarks(watermarkStrategy)
-      .uid(s"spark-expr-eval-timestamps-$groupByName")
-      .name(s"Spark expression eval with timestamps for $groupByName")
-      .setParallelism(sourceSparkProjectedStream.getParallelism)
-
-    val window = TumblingEventTimeWindows
-      .of(Time.milliseconds(tilingWindowSizeInMillis))
-      .asInstanceOf[WindowAssigner[ProjectedEvent, TimeWindow]]
-
-    // We default to the AlwaysFireOnElementTrigger which will cause the window to "FIRE" on every element.
-    // An alternative is the BufferedProcessingTimeTrigger (trigger=buffered in topic info
-    // or properties) which will buffer writes and only "FIRE" every X milliseconds per GroupBy & key.
-    val trigger = getTrigger()
-
-    // We use Flink "Side Outputs" to track any late events that aren't computed.
-    val tilingLateEventsTag = new OutputTag[ProjectedEvent]("tiling-late-events") {}
-
-    // The tiling operator works the following way:
-    // 1. Input: Spark expression eval (previous operator)
-    // 2. Key by the entity key(s) defined in the groupby
-    // 3. Window by a tumbling window
-    // 4. Use our custom trigger that will "FIRE" on every element
-    // 5. the AggregationFunction merges each incoming element with the current IRs which are kept in state
-    //    - Each time a "FIRE" is triggered (i.e. on every event), getResult() is called and the current IRs are emitted
-    // 6. A process window function does additional processing each time the AggregationFunction emits results
-    //    - The only purpose of this window function is to mark tiles as closed so we can do client-side caching in SFS
-    // 7. Output: TimestampedTile, containing the current IRs (Avro encoded) and the timestamp of the current element
-
-    val tilingDS: SingleOutputStreamOperator[TimestampedTile] =
-      sparkExprEvalDSAndWatermarks
-        .keyBy(KeySelectorBuilder.build(groupByServingInfoParsed.groupBy))
-        .window(window)
-        .trigger(trigger)
-        .sideOutputLateData(tilingLateEventsTag)
-        .aggregate(
-          // See Flink's "ProcessWindowFunction with Incremental Aggregation"
-          new FlinkRowAggregationFunction(groupByServingInfoParsed.groupBy, inputSchema, enableDebug),
-          new FlinkRowAggProcessFunction(groupByServingInfoParsed.groupBy, inputSchema, enableDebug)
-        )
-        .uid(s"tiling-01-$groupByName")
-        .name(s"Tiling for $groupByName")
-        .setParallelism(sourceSparkProjectedStream.getParallelism)
-
-    // Track late events
-    tilingDS
-      .getSideOutput(tilingLateEventsTag)
-      .flatMap(new LateEventCounter(groupByName))
-      .uid(s"tiling-side-output-01-$groupByName")
-      .name(s"Tiling Side Output Late Data for $groupByName")
-      .setParallelism(sourceSparkProjectedStream.getParallelism)
-
-    val putRecordDS: DataStream[AvroCodecOutput] = tilingDS
-      .flatMap(TiledAvroCodecFn(groupByServingInfoParsed, tilingWindowSizeInMillis, enableDebug))
-      .uid(s"avro-conversion-01-$groupByName")
-      .name(s"Avro conversion for $groupByName")
-      .setParallelism(sourceSparkProjectedStream.getParallelism)
-
-    AsyncKVStoreWriter.withUnorderedWaits(
-      putRecordDS,
-      sinkFn,
-      groupByName,
-      capacity = kvStoreCapacity
-    )
-  }
-
-  private def getTrigger(): Trigger[ProjectedEvent, TimeWindow] = {
-    FlinkUtils
-      .getProperty("trigger", props, topicInfo)
-      .map {
-        case "always_fire" => new AlwaysFireOnElementTrigger()
-        case "buffered"    => new BufferedProcessingTimeTrigger(100L)
-        case t =>
-          throw new IllegalArgumentException(s"Unsupported trigger type: $t. Supported: 'always_fire', 'buffered'")
-      }
-      .getOrElse(new AlwaysFireOnElementTrigger())
-  }
-}
-
-object FlinkJob {
-  // we set an explicit max parallelism to ensure if we do make parallelism setting updates, there's still room
-  // to restore the job from prior state. Number chosen does have perf ramifications if too high (can impact rocksdb perf)
-  // so we've chosen one that should allow us to scale to jobs in the 10K-50K events / s range.
-  val MaxParallelism: Int = 1260 // highly composite number
 
   // We choose to checkpoint frequently to ensure the incremental checkpoints are small in size
   // as well as ensuring the catch-up backlog is fairly small in case of failures
@@ -409,28 +221,40 @@ object FlinkJob {
 
     // Store the mapping between parent job id and flink job id to bucket
     if (maybeParentJobId.isDefined) {
-      flinkJob.runWriteInternalManifestJob(env, jobArgs.streamingManifestPath(), maybeParentJobId.get)
+      FlinkJob.runWriteInternalManifestJob(env, jobArgs.streamingManifestPath(), maybeParentJobId.get, groupByName)
     }
 
     val jobDatastream = flinkJob.runTiledGroupByJob(env)
 
     jobDatastream
-      .addSink(new MetricsSink(flinkJob.groupByName))
-      .uid(s"metrics-sink - ${flinkJob.groupByName}")
-      .name(s"Metrics Sink for ${flinkJob.groupByName}")
+      .addSink(new MetricsSink(groupByName))
+      .uid(s"metrics-sink - $groupByName")
+      .name(s"Metrics Sink for $groupByName")
       .setParallelism(jobDatastream.getParallelism)
 
-    env.execute(s"${flinkJob.groupByName}")
+    env.execute(s"$groupByName")
   }
 
   private def buildFlinkJob(groupByName: String,
                             props: Map[String, String],
                             api: Api,
                             servingInfo: GroupByServingInfoParsed,
-                            enableDebug: Boolean = false) = {
-    val topicUri = servingInfo.groupBy.streamingSource.get.topic
-    val topicInfo = TopicInfo.parse(topicUri)
+                            enableDebug: Boolean = false): BaseFlinkJob = {
 
+    val logger = LoggerFactory.getLogger(getClass)
+
+    // Extract topic information
+    val topicUri = if (servingInfo.groupBy.streamingSource.get.isSetJoinSource) {
+      // For JoinSource GroupBy, get topic from the left source of the join
+      val joinSource = servingInfo.groupBy.streamingSource.get.getJoinSource
+      val leftSource = joinSource.getJoin.getLeft
+      leftSource.topic
+    } else {
+      // For regular GroupBy, get topic directly
+      servingInfo.groupBy.streamingSource.get.topic
+    }
+
+    val topicInfo = TopicInfo.parse(topicUri)
     val schemaProvider = FlinkSerDeProvider.build(topicInfo)
 
     val deserializationSchema =
@@ -452,17 +276,35 @@ object FlinkJob {
       }
 
     val source = FlinkSourceProvider.build(props, deserializationSchema, topicInfo)
+    val sinkFn = new AsyncKVStoreWriter(api, servingInfo.groupBy.metaData.name, enableDebug)
 
-    new FlinkJob(
-      eventSrc = source,
-      projectedSchema,
-      sinkFn = new AsyncKVStoreWriter(api, servingInfo.groupBy.metaData.name, enableDebug),
-      groupByServingInfoParsed = servingInfo,
-      parallelism = source.parallelism,
-      props = props,
-      topicInfo = topicInfo,
-      enableDebug = enableDebug
-    )
+    // Check if this is a JoinSource GroupBy (chaining feature)
+    if (servingInfo.groupBy.streamingSource.get.isSetJoinSource) {
+      logger.info(s"Detected JoinSource GroupBy: $groupByName. Using FlinkJoinSourceJob.")
+      new FlinkJoinSourceJob(
+        eventSrc = source,
+        inputSchema = projectedSchema,
+        sinkFn = sinkFn,
+        groupByServingInfoParsed = servingInfo,
+        parallelism = source.parallelism,
+        props = props,
+        topicInfo = topicInfo,
+        api = api,
+        enableDebug = enableDebug
+      )
+    } else {
+      logger.info(s"Regular GroupBy: $groupByName. Using FlinkGroupByStreamingJob.")
+      new FlinkGroupByStreamingJob(
+        eventSrc = source,
+        inputSchema = projectedSchema,
+        sinkFn = sinkFn,
+        groupByServingInfoParsed = servingInfo,
+        parallelism = source.parallelism,
+        props = props,
+        topicInfo = topicInfo,
+        enableDebug = enableDebug
+      )
+    }
   }
 
   private def buildApi(onlineClass: String, props: Map[String, String]): Api = {
