@@ -1,8 +1,9 @@
 package ai.chronon.flink.test
 
+import ai.chronon.api.Extensions.GroupByOps
 import ai.chronon.api.ScalaJavaConversions.IteratorOps
 import ai.chronon.api.ScalaJavaConversions.JListOps
-import ai.chronon.flink.SparkExpressionEvalFn
+import ai.chronon.flink.{SparkExpressionEval, SparkExpressionEvalFn}
 import org.apache.flink.streaming.api.datastream.DataStream
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
 import org.apache.spark.sql.Encoders
@@ -19,11 +20,13 @@ class SparkExpressionEvalFnTest extends AnyFlatSpec {
     )
 
     val groupBy = FlinkTestUtils.makeGroupBy(Seq("id"))
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
     val encoder = Encoders.product[E2ETestEvent]
 
     val sparkExprEval = new SparkExpressionEvalFn[E2ETestEvent](
       encoder,
-      groupBy
+      query,
+      groupBy.metaData.name
     )
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -47,12 +50,14 @@ class SparkExpressionEvalFnTest extends AnyFlatSpec {
     )
 
     val groupBy = FlinkTestUtils.makeGroupBy(Seq("id"), filters = null)
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
 
     val encoder = Encoders.product[E2ETestEvent]
 
     val sparkExprEval = new SparkExpressionEvalFn[E2ETestEvent](
       encoder,
-      groupBy
+      query,
+      groupBy.metaData.name
     )
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
@@ -73,11 +78,14 @@ class SparkExpressionEvalFnTest extends AnyFlatSpec {
     )
 
     val groupBy = FlinkTestUtils.makeEntityGroupBy(Seq("id"))
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
     val encoder = Encoders.product[E2ETestMutationEvent]
 
     val sparkExprEval = new SparkExpressionEvalFn[E2ETestMutationEvent](
       encoder,
-      groupBy
+      query,
+      groupBy.metaData.name,
+      groupBy.dataModel
     )
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment

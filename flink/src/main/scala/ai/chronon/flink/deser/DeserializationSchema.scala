@@ -1,5 +1,6 @@
 package ai.chronon.flink.deser
 
+import ai.chronon.api.Extensions.GroupByOps
 import ai.chronon.api.{DataType, GroupBy}
 import ai.chronon.flink.SparkExpressionEval
 import ai.chronon.online.serde.{Mutation, SerDe, SparkConversions}
@@ -100,7 +101,9 @@ class SourceProjectionDeserializationSchema(deserSchemaProvider: SerDe, groupBy:
   override def sourceProjectionEnabled: Boolean = true
 
   override def projectedSchema: Array[(String, DataType)] = {
-    val evaluator = new SparkExpressionEval[Row](sourceEventEncoder, groupBy)
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
+    val evaluator =
+      new SparkExpressionEval[Row](sourceEventEncoder, query, groupBy.getMetaData.getName, groupBy.dataModel)
 
     evaluator.getOutputSchema.fields.map { field =>
       (field.name, SparkConversions.toChrononType(field.name, field.dataType))
@@ -118,7 +121,8 @@ class SourceProjectionDeserializationSchema(deserSchemaProvider: SerDe, groupBy:
     // spark expr eval vars
     val eventExprEncoder = sourceEventEncoder.asInstanceOf[ExpressionEncoder[Row]]
     rowSerializer = eventExprEncoder.createSerializer()
-    evaluator = new SparkExpressionEval[Row](sourceEventEncoder, groupBy)
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
+    evaluator = new SparkExpressionEval[Row](sourceEventEncoder, query, groupBy.getMetaData.getName, groupBy.dataModel)
     evaluator.initialize(metricsGroup)
   }
 

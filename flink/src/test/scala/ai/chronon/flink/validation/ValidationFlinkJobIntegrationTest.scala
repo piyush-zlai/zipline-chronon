@@ -1,5 +1,6 @@
 package ai.chronon.flink.validation
 
+import ai.chronon.api.Extensions.GroupByOps
 import ai.chronon.api.ScalaJavaConversions._
 import ai.chronon.flink.source.FlinkSource
 import ai.chronon.flink.test.{CollectSink, FlinkTestUtils}
@@ -74,7 +75,8 @@ class ValidationFlinkJobIntegrationTest extends AnyFlatSpec with BeforeAndAfter 
                      StructField("created", LongType))
     val encoder = Encoders.row(StructType(fields))
 
-    val outputSchema = new SparkExpressionEval(encoder, groupBy).getOutputSchema
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
+    val outputSchema = new SparkExpressionEval(encoder, query, groupBy.getMetaData.getName, groupBy.dataModel).getOutputSchema
 
     val groupByServingInfoParsed =
       FlinkTestUtils.makeTestGroupByServingInfoParsed(groupBy, encoder.schema, outputSchema)

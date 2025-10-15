@@ -1,6 +1,6 @@
 package ai.chronon.flink
 
-import ai.chronon.api.GroupBy
+import ai.chronon.api.{DataModel, Query}
 import org.apache.flink.api.common.functions.RichFlatMapFunction
 import org.apache.flink.configuration.Configuration
 import org.apache.flink.util.Collector
@@ -10,16 +10,21 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import scala.collection.Seq
 
-/** A Flink function that uses Chronon's CatalystUtil (via the SparkExpressionEval) to evaluate the Spark SQL expression in a GroupBy.
+/** A Flink function that uses Chronon's CatalystUtil (via the SparkExpressionEval) to evaluate the Spark SQL expression.
   * This function is instantiated for a given type T (specific case class object, Thrift / Proto object).
-  * Based on the selects and where clauses in the GroupBy, this function projects and filters the input data and
-  * emits a Map which contains the relevant fields & values that are needed to compute the aggregated values for the
-  * GroupBy.
+  * Based on the selects and where clauses in the Query, this function projects and filters the input data and
+  * emits a Map which contains the relevant fields & values that are needed to compute the aggregated values.
   * @param encoder Spark Encoder for the input data type
-  * @param groupBy The GroupBy to evaluate.
+  * @param query The Query to evaluate
+  * @param groupByName Name to use for metrics and logging
   * @tparam T The type of the input data.
   */
-class SparkExpressionEvalFn[T](encoder: Encoder[T], groupBy: GroupBy) extends RichFlatMapFunction[T, Map[String, Any]] {
+class SparkExpressionEvalFn[T](encoder: Encoder[T],
+                               query: Query,
+                               groupByName: String,
+                               dataModel: DataModel = DataModel.EVENTS)
+    extends RichFlatMapFunction[T, Map[String, Any]] {
+
   @transient lazy val logger: Logger = LoggerFactory.getLogger(getClass)
 
   @transient private var evaluator: SparkExpressionEval[T] = _
@@ -31,11 +36,12 @@ class SparkExpressionEvalFn[T](encoder: Encoder[T], groupBy: GroupBy) extends Ri
     val eventExprEncoder = encoder.asInstanceOf[ExpressionEncoder[T]]
     rowSerializer = eventExprEncoder.createSerializer()
 
-    evaluator = new SparkExpressionEval[T](encoder, groupBy)
+    // Create evaluator with simplified constructor
+    evaluator = new SparkExpressionEval[T](encoder, query, groupByName, dataModel)
 
     val metricsGroup = getRuntimeContext.getMetricGroup
       .addGroup("chronon")
-      .addGroup("feature_group", groupBy.getMetaData.getName)
+      .addGroup("feature_group", groupByName)
 
     evaluator.initialize(metricsGroup)
   }

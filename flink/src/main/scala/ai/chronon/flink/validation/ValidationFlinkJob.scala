@@ -2,7 +2,7 @@ package ai.chronon.flink.validation
 
 import ai.chronon.api.Extensions.{GroupByOps, SourceOps}
 import ai.chronon.flink.validation.SparkExprEvalComparisonFn.compareResultRows
-import ai.chronon.flink.SparkExpressionEvalFn
+import ai.chronon.flink.{SparkExpressionEval, SparkExpressionEvalFn}
 import ai.chronon.online.fetcher.MetadataStore
 import ai.chronon.online.{GroupByServingInfoParsed, TopicInfo}
 import org.apache.flink.api.common.typeinfo.TypeInformation
@@ -129,10 +129,11 @@ class ValidationFlinkJob(eventSrc: FlinkSource[Row],
       .name(s"Source with ID for $groupByName")
       .setParallelism(sourceStream.getParallelism) // Use same parallelism as previous operator
 
+    val query = SparkExpressionEval.queryFromGroupBy(groupByServingInfoParsed.groupBy)
     sourceStreamWithId
       .countWindowAll(validationRows)
-      .apply(
-        new SparkDFVsCatalystComparisonFn(new SparkExpressionEvalFn[Row](encoder, groupByServingInfoParsed.groupBy)))
+      .apply(new SparkDFVsCatalystComparisonFn(
+        new SparkExpressionEvalFn[Row](encoder, query, groupByName, groupByServingInfoParsed.groupBy.dataModel)))
       .returns(TypeInformation.of(classOf[ValidationStats]))
       .uid(s"validation-stats-$groupByName")
       .name(s"Validation stats for $groupByName")

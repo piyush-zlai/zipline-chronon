@@ -1,6 +1,7 @@
 package ai.chronon.flink.test
 
 import ai.chronon.api.Constants.{ReversalColumn, TimeColumn}
+import ai.chronon.api.Extensions.GroupByOps
 import ai.chronon.api.ScalaJavaConversions._
 import ai.chronon.api.GroupBy
 import ai.chronon.flink.{FlinkGroupByStreamingJob, SparkExpressionEval, SparkExpressionEvalFn}
@@ -77,12 +78,13 @@ class FlinkJobEntityIntegrationTest extends AnyFlatSpec with BeforeAndAfter {
 
   private def buildFlinkJob(groupBy: GroupBy,
                             elements: Seq[E2ETestMutationEvent]): (FlinkGroupByStreamingJob, GroupByServingInfoParsed) = {
-    val sparkExpressionEvalFn = new SparkExpressionEvalFn(Encoders.product[E2ETestMutationEvent], groupBy)
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
+    val sparkExpressionEvalFn = new SparkExpressionEvalFn(Encoders.product[E2ETestMutationEvent], query, groupBy.metaData.name, groupBy.dataModel)
     val source = new WatermarkedE2ETestMutationEventSource(elements, sparkExpressionEvalFn)
 
     // Prepare the Flink Job
     val encoder = Encoders.product[E2ETestMutationEvent]
-    val outputSchema = new SparkExpressionEval(encoder, groupBy).getOutputSchema
+    val outputSchema = new SparkExpressionEval(encoder, query, groupBy.getMetaData.getName, groupBy.dataModel).getOutputSchema
     val outputSchemaDataTypes = outputSchema.fields.map { field =>
       (field.name, SparkConversions.toChrononType(field.name, field.dataType))
     }

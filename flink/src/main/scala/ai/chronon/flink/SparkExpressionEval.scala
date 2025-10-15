@@ -18,31 +18,36 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 import scala.collection.Seq
-import scala.jdk.CollectionConverters.asScalaBufferConverter
+import scala.jdk.CollectionConverters._
 
 /** Core utility class for Spark expression evaluation that can be reused across different Flink operators.
   * This evaluator is instantiated for a given EventType (specific case class object, Thrift / Proto object).
-  * Based on the selects and where clauses in the GroupBy, this function projects and filters the input data and
-  * emits a Map which contains the relevant fields & values that are needed to compute the aggregated values for the
-  * GroupBy.
+  * Based on the selects and where clauses in the Query, this function projects and filters the input data and
+  * emits a Map which contains the relevant fields & values that are needed to compute the aggregated values.
   * This class is meant to be used in Flink operators (e.g. DeserializationSchema, RichMapFunctions) to run Spark expression evals.
   *
   * @param encoder Spark Encoder for the input event
-  * @param groupBy The GroupBy to evaluate.
+  * @param query The Query to evaluate
+  * @param groupByName Name for metrics and schema identification
   * @tparam EventType The type of the input event.
   */
-class SparkExpressionEval[EventType](encoder: Encoder[EventType], groupBy: GroupBy) extends Serializable {
+class SparkExpressionEval[EventType](encoder: Encoder[EventType],
+                                     query: Query,
+                                     groupByName: String,
+                                     dataModel: DataModel = DataModel.EVENTS)
+    extends Serializable {
+
   import SparkExpressionEval._
 
   @transient private lazy val logger: Logger = LoggerFactory.getLogger(getClass)
 
-  private val (transforms, filters) = buildQueryTransformsAndFilters(groupBy)
+  private val (transforms, filters) = buildQueryTransformsAndFilters(query, dataModel)
 
   // Chronon's CatalystUtil expects a Chronon `StructType` so we convert the
   // Encoder[T]'s schema to one.
   val chrononSchema: ChrononStructType =
     ChrononStructType.from(
-      s"${groupBy.metaData.cleanName}",
+      groupByName,
       SparkConversions.toChrononSchema(encoder.schema)
     )
 
@@ -73,7 +78,8 @@ class SparkExpressionEval[EventType](encoder: Encoder[EventType], groupBy: Group
     exprEvalErrorCounter = metricsGroup.counter("spark_expr_eval_errors")
 
     // Initialize CatalystUtil without acquiring session reference
-    catalystUtil = new CatalystUtil(chrononSchema, transforms, filters, groupBy.setups)
+    val setups = Option(query.setups).map(_.asScala).getOrElse(Seq.empty)
+    catalystUtil = new CatalystUtil(chrononSchema, transforms, filters, setups)
   }
 
   def performSql(row: InternalRow): Seq[Map[String, Any]] = {
@@ -107,7 +113,8 @@ class SparkExpressionEval[EventType](encoder: Encoder[EventType], groupBy: Group
   }
 
   def getOutputSchema: StructType = {
-    new CatalystUtil(chrononSchema, transforms, filters, groupBy.setups).getOutputSparkSchema
+    val setups = Option(query.setups).map(_.asScala).getOrElse(Seq.empty)
+    new CatalystUtil(chrononSchema, transforms, filters, setups).getOutputSparkSchema
   }
 
   def close(): Unit = {
@@ -185,23 +192,21 @@ class SparkExpressionEval[EventType](encoder: Encoder[EventType], groupBy: Group
 }
 
 object SparkExpressionEval {
-  def validateQuery(gb: GroupBy): Query = {
+  def queryFromGroupBy(gb: GroupBy): Query = {
     require(gb.streamingSource.isDefined, s"Streaming source is missing in GroupBy: ${gb.metaData.cleanName}")
     val query = gb.streamingSource.get.query
     require(query != null, s"Streaming query is missing in GroupBy: ${gb.metaData.cleanName}")
     query
   }
 
-  private def buildQueryTransformsAndFilters(gb: GroupBy): (Seq[(String, String)], Seq[String]) = {
-    val query = validateQuery(gb)
-
+  def buildQueryTransformsAndFilters(query: Query,
+                                     dataModel: DataModel = DataModel.EVENTS): (Seq[(String, String)], Seq[String]) = {
     val timeColumn = Option(query.timeColumn).getOrElse(Constants.TimeColumn)
     val reversalColumn = Option(query.reversalColumn).getOrElse(Constants.ReversalColumn)
-    val mutationTimeColumn =
-      Option(query.mutationTimeColumn).getOrElse(Constants.MutationTimeColumn)
+    val mutationTimeColumn = Option(query.mutationTimeColumn).getOrElse(Constants.MutationTimeColumn)
     val selects = Option(query.selects).map(_.toScala).getOrElse(Map.empty[String, String])
 
-    val transforms: Seq[(String, String)] = gb.dataModel match {
+    val transforms: Seq[(String, String)] = dataModel match {
       case DataModel.EVENTS =>
         (selects ++ Map(Constants.TimeColumn -> timeColumn)).toSeq
       case DataModel.ENTITIES =>
@@ -212,7 +217,7 @@ object SparkExpressionEval {
         )).toSeq
     }
 
-    val timeFilters = gb.dataModel match {
+    val timeFilters = dataModel match {
       case DataModel.ENTITIES => Seq(s"${Constants.MutationTimeColumn} is NOT NULL", s"$timeColumn is NOT NULL")
       case DataModel.EVENTS   => Seq(s"$timeColumn is NOT NULL")
     }
