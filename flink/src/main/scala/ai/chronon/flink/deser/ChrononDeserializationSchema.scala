@@ -1,8 +1,10 @@
 package ai.chronon.flink.deser
 
 import ai.chronon.api
-import ai.chronon.api.GroupBy
+import ai.chronon.api.{DataModel, GroupBy, Query}
+import ai.chronon.api.Extensions.GroupByOps
 import ai.chronon.online.serde.SerDe
+import ai.chronon.flink.SparkExpressionEval
 import org.apache.flink.api.common.serialization.AbstractDeserializationSchema
 import org.apache.spark.sql.{Encoder, Row}
 
@@ -30,12 +32,31 @@ object DeserializationSchemaBuilder {
   def buildSourceIdentityDeserSchema(provider: SerDe,
                                      groupBy: GroupBy,
                                      enableDebug: Boolean = false): ChrononDeserializationSchema[Row] = {
-    new SourceIdentityDeserializationSchema(provider, groupBy, enableDebug)
+    new SourceIdentityDeserializationSchema(provider, groupBy.getMetaData.getName, enableDebug)
+  }
+
+  def buildSourceIdentityDeserSchema(provider: SerDe,
+                                     groupByName: String,
+                                     enableDebug: Boolean): ChrononDeserializationSchema[Row] = {
+    new SourceIdentityDeserializationSchema(provider, groupByName, enableDebug)
   }
 
   def buildSourceProjectionDeserSchema(provider: SerDe,
                                        groupBy: GroupBy,
                                        enableDebug: Boolean = false): ChrononDeserializationSchema[ProjectedEvent] = {
-    new SourceProjectionDeserializationSchema(provider, groupBy, enableDebug)
+    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
+    new SourceProjectionDeserializationSchema(provider,
+                                              query,
+                                              groupBy.getMetaData.getName,
+                                              groupBy.dataModel,
+                                              enableDebug)
+  }
+
+  def buildSourceProjectionDeserSchema(provider: SerDe,
+                                       query: Query,
+                                       groupByName: String,
+                                       dataModel: DataModel,
+                                       enableDebug: Boolean): ChrononDeserializationSchema[ProjectedEvent] = {
+    new SourceProjectionDeserializationSchema(provider, query, groupByName, dataModel, enableDebug)
   }
 }

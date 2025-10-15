@@ -2,7 +2,7 @@ package ai.chronon.flink
 
 import ai.chronon.api.Constants.MetadataDataset
 import ai.chronon.api.Extensions.{GroupByOps, SourceOps}
-import ai.chronon.api.Constants
+import ai.chronon.api.{Constants, DataModel}
 import ai.chronon.flink.{AsyncKVStoreWriter, FlinkGroupByStreamingJob}
 import ai.chronon.flink.deser.{DeserializationSchemaBuilder, FlinkSerDeProvider, ProjectedEvent, SourceProjection}
 import ai.chronon.flink.joinrunner.FlinkJoinSourceJob
@@ -240,25 +240,89 @@ object FlinkJob {
                             api: Api,
                             servingInfo: GroupByServingInfoParsed,
                             enableDebug: Boolean = false): BaseFlinkJob = {
+    // Check if this is a JoinSource GroupBy
+    if (servingInfo.groupBy.streamingSource.get.isSetJoinSource) {
+      buildJoinSourceFlinkJob(groupByName, props, api, servingInfo, enableDebug)
+    } else {
+      buildGroupByStreamingJob(groupByName, props, api, servingInfo, enableDebug)
+    }
+  }
 
+  private def buildJoinSourceFlinkJob(groupByName: String,
+                                      props: Map[String, String],
+                                      api: Api,
+                                      servingInfo: GroupByServingInfoParsed,
+                                      enableDebug: Boolean): FlinkJoinSourceJob = {
     val logger = LoggerFactory.getLogger(getClass)
 
-    // Extract topic information
-    val topicUri = if (servingInfo.groupBy.streamingSource.get.isSetJoinSource) {
-      // For JoinSource GroupBy, get topic from the left source of the join
-      val joinSource = servingInfo.groupBy.streamingSource.get.getJoinSource
-      val leftSource = joinSource.getJoin.getLeft
-      leftSource.topic
-    } else {
-      // For regular GroupBy, get topic directly
-      servingInfo.groupBy.streamingSource.get.topic
-    }
-
-    val topicInfo = TopicInfo.parse(topicUri)
+    val joinSource = servingInfo.groupBy.streamingSource.get.getJoinSource
+    val leftSource = joinSource.getJoin.getLeft
+    val topicInfo = TopicInfo.parse(leftSource.topic)
     val schemaProvider = FlinkSerDeProvider.build(topicInfo)
 
-    val deserializationSchema =
-      DeserializationSchemaBuilder.buildSourceProjectionDeserSchema(schemaProvider, servingInfo.groupBy, enableDebug)
+    // Use left source query for deserialization schema - this is the topic & schema we use to drive
+    // the JoinSource processing
+    val leftSourceQuery = leftSource.query
+    val leftSourceGroupByName = s"left_source_${joinSource.getJoin.getMetaData.getName}"
+
+    val deserializationSchema = DeserializationSchemaBuilder.buildSourceProjectionDeserSchema(
+      schemaProvider,
+      leftSourceQuery,
+      leftSourceGroupByName,
+      DataModel.EVENTS, // TODO - only events supported for left source currently
+      enableDebug
+    )
+
+    require(
+      deserializationSchema.isInstanceOf[SourceProjection],
+      s"Expect created deserialization schema for left source: $leftSourceGroupByName with $topicInfo to mixin SourceProjection. " +
+        s"We got: ${deserializationSchema.getClass.getSimpleName}"
+    )
+
+    val projectedSchema =
+      try {
+        deserializationSchema.asInstanceOf[SourceProjection].projectedSchema
+      } catch {
+        case _: Exception =>
+          throw new RuntimeException(
+            s"Failed to perform projection via Spark SQL eval for groupBy: $groupByName. Retrieved event schema: \n${schemaProvider.schema}\n" +
+              s"Make sure the Spark SQL expressions are valid (e.g. column names match the source event schema).")
+      }
+
+    val source = FlinkSourceProvider.build(props, deserializationSchema, topicInfo)
+    val sinkFn = new AsyncKVStoreWriter(api, servingInfo.groupBy.metaData.name, enableDebug)
+
+    logger.info(s"Building JoinSource GroupBy: $groupByName. Using FlinkJoinSourceJob.")
+    new FlinkJoinSourceJob(
+      eventSrc = source,
+      inputSchema = projectedSchema,
+      sinkFn = sinkFn,
+      groupByServingInfoParsed = servingInfo,
+      parallelism = source.parallelism,
+      props = props,
+      topicInfo = topicInfo,
+      api = api,
+      enableDebug = enableDebug
+    )
+  }
+
+  private def buildGroupByStreamingJob(groupByName: String,
+                                       props: Map[String, String],
+                                       api: Api,
+                                       servingInfo: GroupByServingInfoParsed,
+                                       enableDebug: Boolean): FlinkGroupByStreamingJob = {
+    val logger = LoggerFactory.getLogger(getClass)
+
+    val topicInfo = TopicInfo.parse(servingInfo.groupBy.streamingSource.get.topic)
+    val schemaProvider = FlinkSerDeProvider.build(topicInfo)
+
+    // Use the existing GroupBy-based interface for regular GroupBys
+    val deserializationSchema = DeserializationSchemaBuilder.buildSourceProjectionDeserSchema(
+      schemaProvider,
+      servingInfo.groupBy,
+      enableDebug
+    )
+
     require(
       deserializationSchema.isInstanceOf[SourceProjection],
       s"Expect created deserialization schema for groupBy: $groupByName with $topicInfo to mixin SourceProjection. " +
@@ -278,33 +342,17 @@ object FlinkJob {
     val source = FlinkSourceProvider.build(props, deserializationSchema, topicInfo)
     val sinkFn = new AsyncKVStoreWriter(api, servingInfo.groupBy.metaData.name, enableDebug)
 
-    // Check if this is a JoinSource GroupBy (chaining feature)
-    if (servingInfo.groupBy.streamingSource.get.isSetJoinSource) {
-      logger.info(s"Detected JoinSource GroupBy: $groupByName. Using FlinkJoinSourceJob.")
-      new FlinkJoinSourceJob(
-        eventSrc = source,
-        inputSchema = projectedSchema,
-        sinkFn = sinkFn,
-        groupByServingInfoParsed = servingInfo,
-        parallelism = source.parallelism,
-        props = props,
-        topicInfo = topicInfo,
-        api = api,
-        enableDebug = enableDebug
-      )
-    } else {
-      logger.info(s"Regular GroupBy: $groupByName. Using FlinkGroupByStreamingJob.")
-      new FlinkGroupByStreamingJob(
-        eventSrc = source,
-        inputSchema = projectedSchema,
-        sinkFn = sinkFn,
-        groupByServingInfoParsed = servingInfo,
-        parallelism = source.parallelism,
-        props = props,
-        topicInfo = topicInfo,
-        enableDebug = enableDebug
-      )
-    }
+    logger.info(s"Building regular GroupBy: $groupByName. Using FlinkGroupByStreamingJob.")
+    new FlinkGroupByStreamingJob(
+      eventSrc = source,
+      inputSchema = projectedSchema,
+      sinkFn = sinkFn,
+      groupByServingInfoParsed = servingInfo,
+      parallelism = source.parallelism,
+      props = props,
+      topicInfo = topicInfo,
+      enableDebug = enableDebug
+    )
   }
 
   private def buildApi(onlineClass: String, props: Map[String, String]): Api = {

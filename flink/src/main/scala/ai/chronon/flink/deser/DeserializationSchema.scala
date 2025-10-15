@@ -1,7 +1,6 @@
 package ai.chronon.flink.deser
 
-import ai.chronon.api.Extensions.GroupByOps
-import ai.chronon.api.{DataType, GroupBy}
+import ai.chronon.api.{DataModel, DataType, Query}
 import ai.chronon.flink.SparkExpressionEval
 import ai.chronon.online.serde.{Mutation, SerDe, SparkConversions}
 import com.codahale.metrics.ExponentiallyDecayingReservoir
@@ -14,7 +13,9 @@ import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema
 import org.apache.spark.sql.{Encoder, Encoders, Row}
 import org.slf4j.{Logger, LoggerFactory}
 
-abstract class BaseDeserializationSchema[T](deserSchemaProvider: SerDe, groupBy: GroupBy, enableDebug: Boolean = false)
+abstract class BaseDeserializationSchema[T](deserSchemaProvider: SerDe,
+                                            groupByName: String,
+                                            enableDebug: Boolean = false)
     extends ChrononDeserializationSchema[T] {
 
   @transient lazy val logger: Logger = LoggerFactory.getLogger(getClass)
@@ -32,7 +33,7 @@ abstract class BaseDeserializationSchema[T](deserSchemaProvider: SerDe, groupBy:
     super.open(context)
     val metricsGroup = context.getMetricGroup
       .addGroup("chronon")
-      .addGroup("group_by", groupBy.getMetaData.getName)
+      .addGroup("group_by", groupByName)
     deserializationErrorCounter = metricsGroup.counter("deserialization_errors")
     deserTimeHistogram = metricsGroup.histogram(
       "event_deser_time",
@@ -66,8 +67,8 @@ abstract class BaseDeserializationSchema[T](deserSchemaProvider: SerDe, groupBy:
   }
 }
 
-class SourceIdentityDeserializationSchema(deserSchemaProvider: SerDe, groupBy: GroupBy, enableDebug: Boolean = false)
-    extends BaseDeserializationSchema[Row](deserSchemaProvider, groupBy, enableDebug) {
+class SourceIdentityDeserializationSchema(deserSchemaProvider: SerDe, groupByName: String, enableDebug: Boolean = false)
+    extends BaseDeserializationSchema[Row](deserSchemaProvider, groupByName, enableDebug) {
 
   override def deserialize(messageBytes: Array[Byte], out: Collector[Row]): Unit = {
     val maybeMutation = doDeserializeMutation(messageBytes)
@@ -90,8 +91,12 @@ class SourceIdentityDeserializationSchema(deserSchemaProvider: SerDe, groupBy: G
   */
 case class ProjectedEvent(fields: Map[String, Any], startProcessingTimeMillis: Long)
 
-class SourceProjectionDeserializationSchema(deserSchemaProvider: SerDe, groupBy: GroupBy, enableDebug: Boolean = false)
-    extends BaseDeserializationSchema[ProjectedEvent](deserSchemaProvider, groupBy, enableDebug)
+class SourceProjectionDeserializationSchema(deserSchemaProvider: SerDe,
+                                            query: Query,
+                                            groupByName: String,
+                                            dataModel: DataModel = DataModel.EVENTS,
+                                            enableDebug: Boolean = false)
+    extends BaseDeserializationSchema[ProjectedEvent](deserSchemaProvider, groupByName, enableDebug)
     with SourceProjection {
 
   @transient private var evaluator: SparkExpressionEval[Row] = _
@@ -101,9 +106,7 @@ class SourceProjectionDeserializationSchema(deserSchemaProvider: SerDe, groupBy:
   override def sourceProjectionEnabled: Boolean = true
 
   override def projectedSchema: Array[(String, DataType)] = {
-    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
-    val evaluator =
-      new SparkExpressionEval[Row](sourceEventEncoder, query, groupBy.getMetaData.getName, groupBy.dataModel)
+    val evaluator = new SparkExpressionEval[Row](sourceEventEncoder, query, groupByName, dataModel)
 
     evaluator.getOutputSchema.fields.map { field =>
       (field.name, SparkConversions.toChrononType(field.name, field.dataType))
@@ -114,15 +117,14 @@ class SourceProjectionDeserializationSchema(deserSchemaProvider: SerDe, groupBy:
     super.open(context)
     val metricsGroup = context.getMetricGroup
       .addGroup("chronon")
-      .addGroup("feature_group", groupBy.getMetaData.getName)
+      .addGroup("feature_group", groupByName)
 
     performSqlErrorCounter = metricsGroup.counter("sql_exec_errors")
 
     // spark expr eval vars
     val eventExprEncoder = sourceEventEncoder.asInstanceOf[ExpressionEncoder[Row]]
     rowSerializer = eventExprEncoder.createSerializer()
-    val query = SparkExpressionEval.queryFromGroupBy(groupBy)
-    evaluator = new SparkExpressionEval[Row](sourceEventEncoder, query, groupBy.getMetaData.getName, groupBy.dataModel)
+    evaluator = new SparkExpressionEval[Row](sourceEventEncoder, query, groupByName, dataModel)
     evaluator.initialize(metricsGroup)
   }
 
