@@ -48,18 +48,6 @@ object AsyncKVStoreWriter {
       .setParallelism(inputDS.getParallelism)
   }
 
-  /** This was moved to flink-rpc-akka in Flink 1.16 and made private, so we reproduce the direct execution context here
-    */
-  private class DirectExecutionContext extends ExecutionContext {
-    override def execute(runnable: Runnable): Unit =
-      runnable.run()
-
-    override def reportFailure(cause: Throwable): Unit =
-      throw new IllegalStateException("Error in direct execution context.", cause)
-
-    override def prepare: ExecutionContext = this
-  }
-
   private val ExecutionContextInstance: ExecutionContext = new DirectExecutionContext
 }
 

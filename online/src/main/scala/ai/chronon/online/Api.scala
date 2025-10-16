@@ -255,9 +255,7 @@ abstract class Api(userConf: Map[String, String]) extends Serializable {
   // not sure if thread safe - TODO: double check
 
   // helper functions
-  final def buildFetcher(debug: Boolean = false,
-                         callerName: String = null,
-                         disableErrorThrows: Boolean = false): Fetcher =
+  def buildFetcher(debug: Boolean = false, callerName: String = null, disableErrorThrows: Boolean = false): Fetcher =
     new Fetcher(
       genKvStore,
       Constants.MetadataDataset,
