@@ -203,7 +203,6 @@ object JoinTestUtils {
               "listing_id" -> "listing_id",
               "price" -> "price",
             ),
-            timeColumn = "ts"  // Use created from input join schema
           )
       )),
       keyColumns = Seq("user_id"),
