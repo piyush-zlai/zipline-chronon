@@ -5,6 +5,8 @@ import ai.chronon.api.Extensions._
 import ai.chronon.flink.test.{CollectSink, FlinkTestUtils, MockAsyncKVStoreWriter}
 import ai.chronon.flink.SparkExpressionEvalFn
 import ai.chronon.online.serde.SparkConversions
+import ai.chronon.online.Extensions.StructTypeOps
+import ai.chronon.api.ScalaJavaConversions._
 import ai.chronon.online.{Api, GroupByServingInfoParsed, TopicInfo}
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment
@@ -106,29 +108,22 @@ class FlinkJoinSourceJobIntegrationTest extends AnyFlatSpec with BeforeAndAfter 
     val sparkExpressionEvalFn = new SparkExpressionEvalFn(Encoders.product[JoinTestEvent], leftSourceQuery, leftSourceGroupByName)
     val source = new MockJoinSource(elements, sparkExpressionEvalFn)
 
-    // Define raw event input schema: this matches our JoinTestEvent fields
-    val rawInputSchemaDataTypes = Seq(
+    // Schema after applying projection on the join's input topic
+    val inputSchemaDataTypes = Seq(
       ("user_id", ai.chronon.api.StringType),
       ("listing_id", ai.chronon.api.StringType),
-      ("price", ai.chronon.api.DoubleType),
-      ("created", ai.chronon.api.LongType)
-    )
-    
-    // Projected event schema after applying source query
-    val finalOutputSchemaDataTypes = Seq(
-      ("user_id", ai.chronon.api.StringType),
-      ("listing_id", ai.chronon.api.StringType),
-      ("price", ai.chronon.api.DoubleType),
+      ("price_discounted", ai.chronon.api.DoubleType),
       ("ts", ai.chronon.api.LongType)
     )
 
+    // we don't use the output schema in the Tiling implementation so we pass a dummy one
     val groupByServingInfoParsed =
       FlinkTestUtils.makeTestGroupByServingInfoParsed(
         groupBy,
-        SparkConversions.fromChrononSchema(rawInputSchemaDataTypes),
-        SparkConversions.fromChrononSchema(finalOutputSchemaDataTypes)
+        SparkConversions.fromChrononSchema(inputSchemaDataTypes),
+        SparkConversions.fromChrononSchema(inputSchemaDataTypes)
       )
-    
+
     // Extract topic info from the join source
     val leftSource = joinSource.getJoin.getLeft
     val topicUri = leftSource.topic
@@ -142,7 +137,7 @@ class FlinkJoinSourceJobIntegrationTest extends AnyFlatSpec with BeforeAndAfter 
     
     val flinkJob = new FlinkJoinSourceJob(
       eventSrc = source,
-      inputSchema = finalOutputSchemaDataTypes,
+      inputSchema = inputSchemaDataTypes,
       sinkFn = writerFn,
       groupByServingInfoParsed = groupByServingInfoParsed,
       parallelism = 2,

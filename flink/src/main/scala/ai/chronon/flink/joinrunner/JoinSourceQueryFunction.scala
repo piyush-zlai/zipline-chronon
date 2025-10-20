@@ -95,12 +95,7 @@ object JoinSourceQueryFunction {
     val timeColumn = Option(joinSource.query.timeColumn).getOrElse(Constants.TimeColumn)
     val rawSelects = joinSource.query.selects.asScala.toMap
 
-    // Add time column mapping only if not already present
-    val timeColumnMapping = if (rawSelects.contains(Constants.TimeColumn)) {
-      Map.empty[String, String] // Don't override existing ts mapping
-    } else {
-      Map(Constants.TimeColumn -> timeColumn) // Add ts -> timeColumn mapping
-    }
+    val timeColumnMapping = Map(Constants.TimeColumn -> timeColumn) // Add ts -> timeColumn mapping
     val selectsWithTimeColumn = (rawSelects ++ timeColumnMapping).toSeq
     val wheres = Option(joinSource.query.wheres).map(_.asScala).getOrElse(Seq.empty)
 

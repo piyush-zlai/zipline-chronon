@@ -101,9 +101,9 @@ class TestFetcher(kvStore: KVStore) extends Fetcher(
     val responses = requests.map { request =>
       val listingId = request.keys.getOrElse("listing_id", "unknown").toString
 
-      // Return enrichment values based on listing_id - parent join returns price_last for each listing
+      // Return enrichment values based on listing_id - parent join returns price_discounted_last for each listing
       val enrichmentValues = Map[String, AnyRef](
-        "price_last" -> (listingId match {
+        "price_discounted_last" -> (listingId match {
           case "listing1" => 50.0.asInstanceOf[AnyRef]  // Last price for listing1
           case "listing2" => 150.0.asInstanceOf[AnyRef] // Last price for listing2
           case "listing3" => 25.0.asInstanceOf[AnyRef]  // Last price for listing3
@@ -136,7 +136,7 @@ object TestJoinCodec {
 
     // Value schema: only price_last (the feature from GroupBy 1)
     val valueFields = Array(
-      StructField("price_last", DoubleType)  // Feature from GroupBy 1
+      StructField("price_discounted_last", DoubleType)  // Feature from GroupBy 1
     )
     val valueSchema = StructType("parent_join_value", valueFields)
 
@@ -164,7 +164,7 @@ object JoinTestUtils {
     val parentJoin = Builders.Join(
       left = Builders.Source.events(
         query = Builders.Query(
-          selects = Map("user_id" -> "user_id", "listing_id" -> "listing_id", "price" -> "price"),
+          selects = Map("user_id" -> "user_id", "listing_id" -> "listing_id", "price_discounted" -> "price * 0.95"),
           timeColumn = "created"
         ),
         table = "test.listing_views",
@@ -182,7 +182,7 @@ object JoinTestUtils {
             aggregations = Seq(
               Builders.Aggregation(
                 operation = Operation.LAST,
-                inputColumn = "price"
+                inputColumn = "price_discounted"
               )
             ),
             metaData = Builders.MetaData(name = "test.listing_features")
@@ -201,7 +201,7 @@ object JoinTestUtils {
             selects = Map(
               "user_id" -> "user_id",
               "listing_id" -> "listing_id",
-              "price" -> "price",
+              "final_price" -> "price_discounted_last",
             ),
           )
       )),
@@ -209,7 +209,7 @@ object JoinTestUtils {
       aggregations = Seq(
         Builders.Aggregation(
           operation = Operation.LAST_K,
-          inputColumn = "price",  // Use simple price field
+          inputColumn = "final_price",  // Use simple price field
           argMap = Map("k" -> "10"),
           windows = Seq(new Window(1, TimeUnit.DAYS))
         )

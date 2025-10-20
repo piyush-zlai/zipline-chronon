@@ -153,23 +153,24 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       .name(s"Async Join Enrichment for $groupByName")
 
     // Apply join source query transformations only if there are transformations to apply
-    val processedStream = if (joinSource.query != null && joinSource.query.selects != null && !joinSource.query.selects.isEmpty) {
-      logger.info("Applying join source query transformations")
-      val queryFunction = new JoinSourceQueryFunction(
-        joinSource,
-        inputSchema,
-        api,
-        enableDebug
-      )
+    val processedStream =
+      if (joinSource.query != null && joinSource.query.selects != null && !joinSource.query.selects.isEmpty) {
+        logger.info("Applying join source query transformations")
+        val queryFunction = new JoinSourceQueryFunction(
+          joinSource,
+          inputSchema,
+          api,
+          enableDebug
+        )
 
-      enrichedStream
-        .flatMap(queryFunction)
-        .uid(s"join-source-query-$groupByName")
-        .name(s"Join Source Query for $groupByName")
-    } else {
-      logger.info("No join source query transformations to apply - using enriched stream directly")
-      enrichedStream
-    }
+        enrichedStream
+          .flatMap(queryFunction)
+          .uid(s"join-source-query-$groupByName")
+          .name(s"Join Source Query for $groupByName")
+      } else {
+        logger.info("No join source query transformations to apply - using enriched stream directly")
+        enrichedStream
+      }
 
     // Compute the output schema after JoinSourceQueryFunction transformations using Catalyst
     val postTransformationSchema = computePostTransformationSchemaWithCatalyst(joinSource, inputSchema)
