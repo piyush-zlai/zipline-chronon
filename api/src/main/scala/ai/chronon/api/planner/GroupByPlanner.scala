@@ -96,9 +96,11 @@ case class GroupByPlanner(groupBy: GroupBy)(implicit outputPartitionSpec: Partit
         )
         .setStartOffset(WindowUtils.zero())
         .setEndOffset(WindowUtils.zero())
-      
+
       // If this GroupBy has a JoinSource, add dependency on upstream join's metadata upload
-      val joinSourceDeps = Option(groupBy.sources).map(_.asScala).getOrElse(Seq.empty)
+      val joinSourceDeps = Option(groupBy.sources)
+        .map(_.asScala)
+        .getOrElse(Seq.empty)
         .filter(_.isSetJoinSource)
         .map { source =>
           val upstreamJoin = source.getJoinSource.getJoin
