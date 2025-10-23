@@ -128,6 +128,7 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       .assignTimestampsAndWatermarks(watermarkStrategy)
       .uid(s"join-source-watermarks-$groupByName")
       .name(s"Spark expression eval with timestamps for $groupByName")
+      .setParallelism(sourceSparkProjectedStream.getParallelism)
 
     // Apply async join enrichment using extracted function
     // key format joins/<team>/join_name
@@ -151,6 +152,7 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       )
       .uid(s"join-enrichment-$groupByName")
       .name(s"Async Join Enrichment for $groupByName")
+      .setParallelism(watermarkedStream.getParallelism)
 
     // Apply join source query transformations only if there are transformations to apply
     val processedStream =
@@ -167,6 +169,7 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
           .flatMap(queryFunction)
           .uid(s"join-source-query-$groupByName")
           .name(s"Join Source Query for $groupByName")
+          .setParallelism(sourceSparkProjectedStream.getParallelism)
       } else {
         logger.info("No join source query transformations to apply - using enriched stream directly")
         enrichedStream
@@ -205,6 +208,7 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
         )
         .uid(s"tiling-$groupByName")
         .name(s"Tiling for $groupByName")
+        .setParallelism(sourceSparkProjectedStream.getParallelism)
 
     // Track late events
     tilingDS
@@ -212,12 +216,14 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       .flatMap(new LateEventCounter(groupByName))
       .uid(s"tiling-side-output-$groupByName")
       .name(s"Tiling Side Output Late Data for $groupByName")
+      .setParallelism(sourceSparkProjectedStream.getParallelism)
 
     // Convert tiles to AvroCodecOutput format for KV store writing
     val avroConvertedStream = tilingDS
       .flatMap(TiledAvroCodecFn(groupByServingInfoParsed, tilingWindowSizeInMillis, enableDebug))
       .uid(s"avro-conversion-$groupByName")
       .name(s"Avro Conversion for $groupByName")
+      .setParallelism(sourceSparkProjectedStream.getParallelism)
 
     // Write to KV store using existing AsyncKVStoreWriter
     AsyncKVStoreWriter.withUnorderedWaits(
