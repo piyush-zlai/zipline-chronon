@@ -76,6 +76,35 @@ case class MonolithJoinPlanner(join: Join)(implicit outputPartitionSpec: Partiti
       Seq(groupByDep) ++ upstreamJoinDeps
     }
 
+    // Add dependencies on upstream join metadata uploads if any GroupBy has JoinSource
+    // Skip this for GroupBys with streaming sources since the streaming node will add this dependency
+    val upstreamJoinDeps = Option(join.joinParts).map(_.asScala).getOrElse(Seq.empty).flatMap { joinPart =>
+      val groupBy = joinPart.groupBy
+      val hasStreamingSource = groupBy.streamingSource.isDefined
+      
+      if (hasStreamingSource) {
+        // Skip adding metadata upload dependencies for streaming GroupBys
+        // The streaming node will handle this as it needs to fetch upstream joins and needs metadata for that
+        Seq.empty
+      } else {
+        Option(groupBy.sources).map(_.asScala).getOrElse(Seq.empty)
+          .filter(_.isSetJoinSource)
+          .map { source =>
+            val upstreamJoin = source.getJoinSource.getJoin
+            val upstreamMetadataUploadTable = upstreamJoin.metaData.outputTable + "__metadata_upload"
+            new TableDependency()
+              .setTableInfo(
+                new TableInfo()
+                  .setTable(upstreamMetadataUploadTable)
+              )
+              .setStartOffset(WindowUtils.zero())
+              .setEndOffset(WindowUtils.zero())
+          }
+      }
+    }
+
+    val allDeps = joinPartDeps ++ upstreamJoinDeps
+
     val metaData =
       MetaDataUtils.layer(join.metaData,
                           "metadata_upload",

@@ -96,9 +96,21 @@ case class GroupByPlanner(groupBy: GroupBy)(implicit outputPartitionSpec: Partit
         )
         .setStartOffset(WindowUtils.zero())
         .setEndOffset(WindowUtils.zero())
-
+      
       // If this GroupBy has a JoinSource, add dependency on upstream join's metadata upload
-      val joinSourceDeps = TableDependencies.fromJoinSources(groupBy.sources)
+      val joinSourceDeps = Option(groupBy.sources).map(_.asScala).getOrElse(Seq.empty)
+        .filter(_.isSetJoinSource)
+        .map { source =>
+          val upstreamJoin = source.getJoinSource.getJoin
+          val upstreamMetadataUploadTable = upstreamJoin.metaData.outputTable + "__metadata_upload"
+          new TableDependency()
+            .setTableInfo(
+              new TableInfo()
+                .setTable(upstreamMetadataUploadTable)
+            )
+            .setStartOffset(WindowUtils.zero())
+            .setEndOffset(WindowUtils.zero())
+        }
 
       val streamingTableDeps = Seq(uploadToKVDep) ++ joinSourceDeps
 
