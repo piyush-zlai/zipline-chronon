@@ -49,7 +49,7 @@ class JoinSourceQueryFunction(joinSource: JoinSource,
       .addGroup("chronon")
       .addGroup("join_source", joinSource.join.metaData.getName)
       .addGroup("group_by", groupByName)
-    
+
     successCounter = group.counter("query_eval.successes")
     errorCounter = group.counter("query_eval.errors")
     queryLatencyHistogram = group.histogram(
@@ -128,8 +128,7 @@ object JoinSourceQueryFunction {
       (field.name, chrononType)
     }.toSeq
 
-    logger.info(
-      s"""
+    logger.info(s"""
          |Building CatalystUtil for join source query:
          |Selects with time column: ${selectsWithTimeColumn}
          |Wheres: ${wheres}

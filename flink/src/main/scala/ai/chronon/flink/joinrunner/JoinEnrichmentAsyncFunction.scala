@@ -46,7 +46,7 @@ class JoinEnrichmentAsyncFunction(joinRequestName: String, groupByName: String, 
       .addGroup("chronon")
       .addGroup("group_by", groupByName)
       .addGroup("join_enrichment", joinRequestName)
-      
+
     successCounter = group.counter("join_fetch.successes")
     errorCounter = group.counter("join_fetch.errors")
     joinFetchLatencyHistogram = group.histogram(
@@ -82,7 +82,7 @@ class JoinEnrichmentAsyncFunction(joinRequestName: String, groupByName: String, 
         // Record latency and increment success counter
         joinFetchLatencyHistogram.update(System.currentTimeMillis() - startTime)
         successCounter.inc()
-        
+
         if (responses.nonEmpty) {
           val response = responses.head
           val responseMap = response.values.getOrElse(Map.empty[String, Any])
@@ -108,7 +108,7 @@ class JoinEnrichmentAsyncFunction(joinRequestName: String, groupByName: String, 
         // Record latency and increment error counter
         joinFetchLatencyHistogram.update(System.currentTimeMillis() - startTime)
         errorCounter.inc()
-        
+
         logger.error("Error fetching join data", ex)
         completableFuture.completeExceptionally(ex)
     }
@@ -126,7 +126,7 @@ class JoinEnrichmentAsyncFunction(joinRequestName: String, groupByName: String, 
   override def timeout(event: ProjectedEvent, resultFuture: ResultFuture[ProjectedEvent]): Unit = {
     // Increment error counter for timeout
     errorCounter.inc()
-    
+
     logger.warn(s"Join enrichment timeout for event: ${event.fields}")
     // On timeout, pass through the original event without enrichment
     resultFuture.complete(java.util.Collections.singleton(event))
