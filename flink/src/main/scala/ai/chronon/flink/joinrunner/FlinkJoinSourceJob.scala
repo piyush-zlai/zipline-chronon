@@ -130,12 +130,10 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       .name(s"Spark expression eval with timestamps for $groupByName")
       .setParallelism(sourceSparkProjectedStream.getParallelism)
 
-    // Pass all left source field names to match Spark JoinSourceRunner approach
-    val leftSourceFieldNames = inputSchema.map(_._1).toArray
     val enrichmentFunction = new JoinEnrichmentAsyncFunction(
       joinSource.join.metaData.getName,
+      groupByName,
       api,
-      leftSourceFieldNames,
       enableDebug
     )
 
@@ -149,7 +147,7 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       )
       .uid(s"join-enrichment-$groupByName")
       .name(s"Async Join Enrichment for $groupByName")
-      .setParallelism(watermarkedStream.getParallelism)
+      .setParallelism(sourceSparkProjectedStream.getParallelism)
 
     // Apply join source query transformations only if there are transformations to apply
     val processedStream =
@@ -158,6 +156,7 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
         val queryFunction = new JoinSourceQueryFunction(
           joinSource,
           inputSchema,
+          groupByName,
           api,
           enableDebug
         )
@@ -240,28 +239,14 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       originalInputSchema: Seq[(String, DataType)]): Seq[(String, DataType)] = {
     if (joinSource.query == null || joinSource.query.selects == null || joinSource.query.selects.isEmpty) {
       // No transformations applied, return join schema (includes enrichment)
-      try {
-        val joinSchema = JoinSourceQueryFunction.buildJoinSchema(originalInputSchema, joinSource, api, enableDebug)
-        joinSchema.fields.map { field =>
-          (field.name, field.fieldType)
-        }.toSeq
-      } catch {
-        case ex: Exception =>
-          logger.warn(s"Failed to compute join schema, falling back to original schema", ex)
-          originalInputSchema
-      }
+      val joinSchema = JoinSourceQueryFunction.buildJoinSchema(originalInputSchema, joinSource, api, enableDebug)
+      joinSchema.fields.map { field =>
+        (field.name, field.fieldType)
+      }.toSeq
     } else {
       // Use shared method to determine the exact output schema
-      try {
-        val result = JoinSourceQueryFunction.buildCatalystUtil(joinSource, originalInputSchema, api, enableDebug)
-        result.outputSchema
-      } catch {
-        case ex: Exception =>
-          logger.warn(s"Failed to compute post-transformation schema using Catalyst, falling back to original schema",
-                      ex)
-          originalInputSchema
-      }
+      val result = JoinSourceQueryFunction.buildCatalystUtil(joinSource, originalInputSchema, api, enableDebug)
+      result.outputSchema
     }
   }
-
 }

@@ -1,13 +1,14 @@
 package ai.chronon.flink.joinrunner
 
-import ai.chronon.api.{Builders, DataType, DoubleType, IntType, LongType, StringType}
+import ai.chronon.api.{Builders, DoubleType, IntType, LongType, StringType}
 import ai.chronon.flink.deser.ProjectedEvent
 import ai.chronon.online.{Api, JoinCodec}
 import ai.chronon.online.fetcher.Fetcher
-import ai.chronon.online.serde.SparkConversions
+import org.apache.flink.api.common.functions.RuntimeContext
 import org.apache.flink.configuration.Configuration
+import org.apache.flink.metrics.{Counter, Histogram, MetricGroup}
+import org.apache.flink.metrics.groups.OperatorMetricGroup
 import org.apache.flink.util.Collector
-import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
 import org.scalatest.flatspec.AnyFlatSpec
@@ -15,7 +16,6 @@ import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar
 
 import scala.collection.mutable.ListBuffer
-import scala.jdk.CollectionConverters._
 
 class JoinSourceQueryFunctionTest extends AnyFlatSpec with Matchers with MockitoSugar {
 
@@ -24,6 +24,24 @@ class JoinSourceQueryFunctionTest extends AnyFlatSpec with Matchers with Mockito
     ("price", DoubleType),
     ("timestamp", LongType)
   )
+
+  private def setupFunctionWithMockedMetrics(function: JoinSourceQueryFunction): Unit = {
+    // Mock the runtime context and metrics
+    val mockRuntimeContext = mock[RuntimeContext]
+    val mockOperatorMetricGroup = mock[OperatorMetricGroup]
+    val mockSubGroup = mock[MetricGroup]
+    val mockCounter = mock[Counter]
+    val mockHistogram = mock[Histogram]
+    
+    // Mock the metric group chain
+    when(mockRuntimeContext.getMetricGroup).thenReturn(mockOperatorMetricGroup)
+    when(mockOperatorMetricGroup.addGroup("chronon")).thenReturn(mockSubGroup)
+    when(mockSubGroup.addGroup(anyString(), anyString())).thenReturn(mockSubGroup)
+    when(mockSubGroup.counter(anyString())).thenReturn(mockCounter)
+    when(mockSubGroup.histogram(anyString(), any())).thenReturn(mockHistogram)
+    
+    function.setRuntimeContext(mockRuntimeContext)
+  }
 
   "JoinSourceQueryFunction" should "apply SQL transformations correctly" in {
     // Create a join source with SQL query
@@ -68,7 +86,8 @@ class JoinSourceQueryFunctionTest extends AnyFlatSpec with Matchers with Mockito
     ))
     when(mockJoinCodec.valueSchema).thenReturn(joinValueSchema)
 
-    val function = new JoinSourceQueryFunction(joinSource, inputSchema, mockApi, enableDebug = false)
+    val function = new JoinSourceQueryFunction(joinSource, inputSchema, groupByName = "testGB", mockApi, enableDebug = false)
+    setupFunctionWithMockedMetrics(function)
     function.open(new Configuration())
 
     // Create enriched event (after join processing)
@@ -139,7 +158,8 @@ class JoinSourceQueryFunctionTest extends AnyFlatSpec with Matchers with Mockito
     ))
     when(mockJoinCodec.valueSchema).thenReturn(joinValueSchema)
 
-    val function = new JoinSourceQueryFunction(joinSource, inputSchema, mockApi, enableDebug = false)
+    val function = new JoinSourceQueryFunction(joinSource, inputSchema, groupByName = "testGB", mockApi, enableDebug = false)
+    setupFunctionWithMockedMetrics(function)
     function.open(new Configuration())
 
     // Create enriched event with fields that should work
@@ -204,16 +224,11 @@ class JoinSourceQueryFunctionTest extends AnyFlatSpec with Matchers with Mockito
     ))
     when(mockJoinCodec.valueSchema).thenReturn(joinValueSchema)
 
-    val function = new JoinSourceQueryFunction(joinSource, inputSchema, mockApi, enableDebug = false)
+    val function = new JoinSourceQueryFunction(joinSource, inputSchema, groupByName = "testGB", mockApi, enableDebug = false)
+    setupFunctionWithMockedMetrics(function)
     
     // Opening the function should trigger schema building without errors
     function.open(new Configuration())
-    
-    // If we get here without exceptions, schema building worked
-    // The buildJoinSchema method combines:
-    // - inputSchema fields: user_id (StringType), price (DoubleType), timestamp (LongType) 
-    // - joinCodec.valueSchema fields: enriched_field (StringType), another_enriched (IntType)
-    // Total schema should have 5 fields
     
     verify(mockJoinCodec, org.mockito.Mockito.atLeast(1)).valueSchema // Should have accessed the join schema
   }

@@ -5,6 +5,9 @@ import ai.chronon.flink.deser.ProjectedEvent
 import ai.chronon.online.fetcher.Fetcher
 import ai.chronon.online.Api
 import org.apache.flink.configuration.Configuration
+import org.apache.flink.api.common.functions.RuntimeContext
+import org.apache.flink.metrics.{Counter, Histogram, MetricGroup}
+import org.apache.flink.metrics.groups.OperatorMetricGroup
 import org.apache.flink.streaming.api.functions.async.ResultFuture
 import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
@@ -18,8 +21,25 @@ import scala.concurrent.Promise
 class JoinEnrichmentAsyncFunctionTest extends AnyFlatSpec with Matchers with MockitoSugar {
 
   val joinRequestName = "joins/test_team/test_join"
-  val keyColumns = Array("user_id")
   val enableDebug = false
+
+  private def setupFunctionWithMockedMetrics(function: JoinEnrichmentAsyncFunction): Unit = {
+    // Mock the runtime context and metrics
+    val mockRuntimeContext = mock[RuntimeContext]
+    val mockOperatorMetricGroup = mock[OperatorMetricGroup]
+    val mockSubGroup = mock[MetricGroup]
+    val mockCounter = mock[Counter]
+    val mockHistogram = mock[Histogram]
+    
+    // Mock the metric group chain
+    when(mockRuntimeContext.getMetricGroup).thenReturn(mockOperatorMetricGroup)
+    when(mockOperatorMetricGroup.addGroup("chronon")).thenReturn(mockSubGroup)
+    when(mockSubGroup.addGroup(anyString(), anyString())).thenReturn(mockSubGroup)
+    when(mockSubGroup.counter(anyString())).thenReturn(mockCounter)
+    when(mockSubGroup.histogram(anyString(), any())).thenReturn(mockHistogram)
+    
+    function.setRuntimeContext(mockRuntimeContext)
+  }
 
   "JoinEnrichmentAsyncFunction" should "enrich events with join response" in {
     val mockApi = mock[Api]
@@ -36,7 +56,8 @@ class JoinEnrichmentAsyncFunctionTest extends AnyFlatSpec with Matchers with Moc
     joinFuture.success(Seq(joinResponse))
     when(mockFetcher.fetchJoin(any(), any())).thenReturn(joinFuture.future)
     
-    val function = new JoinEnrichmentAsyncFunction(joinRequestName, mockApi, keyColumns, enableDebug)
+    val function = new JoinEnrichmentAsyncFunction(joinRequestName, "testGB", mockApi, enableDebug)
+    setupFunctionWithMockedMetrics(function)
     function.open(new Configuration())
     
     // Create test event
@@ -83,7 +104,8 @@ class JoinEnrichmentAsyncFunctionTest extends AnyFlatSpec with Matchers with Moc
     
     when(mockApi.buildFetcher(debug = enableDebug)).thenReturn(mockFetcher)
     
-    val function = new JoinEnrichmentAsyncFunction(joinRequestName, mockApi, keyColumns, enableDebug)
+    val function = new JoinEnrichmentAsyncFunction(joinRequestName, "testGB", mockApi, enableDebug)
+    setupFunctionWithMockedMetrics(function)
     function.open(new Configuration())
     
     // Create test event
@@ -130,7 +152,8 @@ class JoinEnrichmentAsyncFunctionTest extends AnyFlatSpec with Matchers with Moc
     joinFuture.success(Seq.empty)
     when(mockFetcher.fetchJoin(any(), any())).thenReturn(joinFuture.future)
     
-    val function = new JoinEnrichmentAsyncFunction(joinRequestName, mockApi, keyColumns, enableDebug)
+    val function = new JoinEnrichmentAsyncFunction(joinRequestName, "testGB", mockApi, enableDebug)
+    setupFunctionWithMockedMetrics(function)
     function.open(new Configuration())
     
     // Create test event

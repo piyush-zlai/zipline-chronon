@@ -6,6 +6,8 @@ import ai.chronon.online.{Api, CatalystUtil, JoinCodec}
 import ai.chronon.online.serde.SparkConversions
 import org.apache.flink.api.common.functions.RichFlatMapFunction
 import org.apache.flink.configuration.Configuration
+import org.apache.flink.dropwizard.metrics.DropwizardHistogramWrapper
+import org.apache.flink.metrics.{Counter, Histogram}
 import org.apache.flink.util.Collector
 import org.slf4j.{Logger, LoggerFactory}
 
@@ -24,12 +26,16 @@ import scala.jdk.CollectionConverters._
   */
 class JoinSourceQueryFunction(joinSource: JoinSource,
                               inputSchema: Seq[(String, DataType)],
+                              groupByName: String,
                               api: Api,
                               enableDebug: Boolean)
     extends RichFlatMapFunction[ProjectedEvent, ProjectedEvent] {
 
   @transient private lazy val logger: Logger = LoggerFactory.getLogger(getClass)
   @transient private var catalystUtil: CatalystUtil = _
+  @transient private var successCounter: Counter = _
+  @transient private var errorCounter: Counter = _
+  @transient private var queryLatencyHistogram: Histogram = _
 
   override def open(parameters: Configuration): Unit = {
     super.open(parameters)
@@ -39,32 +45,45 @@ class JoinSourceQueryFunction(joinSource: JoinSource,
     val result = JoinSourceQueryFunction.buildCatalystUtil(joinSource, inputSchema, api, enableDebug)
     catalystUtil = result.catalystUtil
 
+    val group = getRuntimeContext.getMetricGroup
+      .addGroup("chronon")
+      .addGroup("join_source", joinSource.join.metaData.getName)
+      .addGroup("group_by", groupByName)
+    
+    successCounter = group.counter("query_eval.successes")
+    errorCounter = group.counter("query_eval.errors")
+    queryLatencyHistogram = group.histogram(
+      "query_eval_latency",
+      new DropwizardHistogramWrapper(
+        new com.codahale.metrics.Histogram(new com.codahale.metrics.ExponentiallyDecayingReservoir())
+      )
+    )
+
     logger.info(s"Initialized CatalystUtil with join schema")
   }
 
   override def flatMap(enrichedEvent: ProjectedEvent, out: Collector[ProjectedEvent]): Unit = {
+    val startTime = System.currentTimeMillis()
     try {
-      if (catalystUtil != null) {
-        // Apply join source query to the enriched event fields
-        val scalaFields = enrichedEvent.fields
-        val queryResults = catalystUtil.performSql(scalaFields)
+      val queryResults = catalystUtil.performSql(enrichedEvent.fields)
 
-        if (enableDebug) {
-          logger.info(s"Join source query input: ${scalaFields}")
-          logger.info(s"Join source query results: $queryResults")
-        }
+      queryLatencyHistogram.update(System.currentTimeMillis() - startTime)
+      successCounter.inc()
 
-        // Output each result as a ProjectedEvent
-        queryResults.foreach { resultFields =>
-          val resultEvent = ProjectedEvent(resultFields, enrichedEvent.startProcessingTimeMillis)
-          out.collect(resultEvent)
-        }
-      } else {
-        // No query to apply, pass through the enriched event
-        out.collect(enrichedEvent)
+      if (enableDebug) {
+        logger.info(s"Join source query input: ${enrichedEvent.fields}")
+        logger.info(s"Join source query results: $queryResults")
+      }
+
+      // Output each result as a ProjectedEvent
+      queryResults.foreach { resultFields =>
+        val resultEvent = ProjectedEvent(resultFields, enrichedEvent.startProcessingTimeMillis)
+        out.collect(resultEvent)
       }
     } catch {
       case ex: Exception =>
+        errorCounter.inc()
+        queryLatencyHistogram.update(System.currentTimeMillis() - startTime)
         logger.error(s"Error applying join source query to event: ${enrichedEvent.fields}", ex)
         // On error, pass through the original enriched event
         out.collect(enrichedEvent)
@@ -109,10 +128,14 @@ object JoinSourceQueryFunction {
       (field.name, chrononType)
     }.toSeq
 
-    logger.info(s"Built CatalystUtil for join source query:")
-    logger.info(s"Query selects: $selectsWithTimeColumn, wheres: $wheres")
-    logger.info(s"Time column mapping: ${Constants.TimeColumn} -> $timeColumn")
-    logger.info(s"Output schema: ${outputSchema.map { case (name, dataType) => s"$name: $dataType" }.mkString(", ")}")
+    logger.info(
+      s"""
+         |Building CatalystUtil for join source query:
+         |Selects with time column: ${selectsWithTimeColumn}
+         |Wheres: ${wheres}
+         |Time column mapping: ${Constants.TimeColumn} -> ${timeColumn}
+         |Output schema: ${outputSchema.map { case (name, dataType) => s"$name: $dataType" }.mkString(", ")}
+         |""".stripMargin)
 
     JoinSourceQueryResult(catalystUtil, joinSchema, outputSchema)
   }
