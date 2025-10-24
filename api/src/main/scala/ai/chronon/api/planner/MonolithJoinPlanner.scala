@@ -69,21 +69,7 @@ case class MonolithJoinPlanner(join: Join)(implicit outputPartitionSpec: Partiti
         // Skip this for streaming GroupBys since the streaming node will handle this dependency
         Seq.empty
       } else {
-        Option(groupBy.sources)
-          .map(_.asScala)
-          .getOrElse(Seq.empty)
-          .filter(_.isSetJoinSource)
-          .map { source =>
-            val upstreamJoin = source.getJoinSource.getJoin
-            val upstreamMetadataUploadTable = upstreamJoin.metaData.outputTable + "__metadata_upload"
-            new TableDependency()
-              .setTableInfo(
-                new TableInfo()
-                  .setTable(upstreamMetadataUploadTable)
-              )
-              .setStartOffset(WindowUtils.zero())
-              .setEndOffset(WindowUtils.zero())
-          }
+        TableDependencies.fromJoinSources(groupBy.sources)
       }
 
       // Return both the GroupBy dependency and any upstream join dependencies
