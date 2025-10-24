@@ -130,13 +130,10 @@ class FlinkJoinSourceJob(eventSrc: FlinkSource[ProjectedEvent],
       .name(s"Spark expression eval with timestamps for $groupByName")
       .setParallelism(sourceSparkProjectedStream.getParallelism)
 
-    // Apply async join enrichment using extracted function
-    // key format joins/<team>/join_name
-    val joinRequestName = joinSource.join.metaData.getName.replaceFirst("\\.", "/")
     // Pass all left source field names to match Spark JoinSourceRunner approach
     val leftSourceFieldNames = inputSchema.map(_._1).toArray
     val enrichmentFunction = new JoinEnrichmentAsyncFunction(
-      joinRequestName,
+      joinSource.join.metaData.getName,
       api,
       leftSourceFieldNames,
       enableDebug

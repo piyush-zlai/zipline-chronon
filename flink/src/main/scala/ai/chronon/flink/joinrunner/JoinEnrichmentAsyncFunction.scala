@@ -18,7 +18,7 @@ import scala.util.{Failure, Success}
   * and enriches them with features from upstream joins, producing enriched ProjectedEvent objects
   * that contain both original fields and joined features.
   *
-  * @param joinRequestName The name of the join to fetch (format: "joins/team/join_name")
+  * @param joinRequestName The name of the join to fetch (format: "joins/join_name")
   * @param api API implementation for fetcher access
   * @param fieldNames Array of all field names from the left source to pass to join request
   * @param enableDebug Whether to enable debug logging
